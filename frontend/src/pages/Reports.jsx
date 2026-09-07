@@ -1,60 +1,22 @@
-// OWNER: Person 5 - Reports & Database (UC5 View Sales Report, UC12 Export CSV)
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
-
-const BASE_URL = 'http://localhost:8000/api';
-
+import { Page, Panel, Notice, EmptyRow } from '../components/Dashboard';
+const money = value => `K${Number(value).toFixed(2)}`;
 export default function Reports() {
   const [report, setReport] = useState(null);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    apiFetch('/reports/sales-report/').then(setReport).catch(err => setError(err.message));
-  }, []);
-
-  // UC12: Export Report (CSV) - hits the export endpoint directly with the auth header
-  function exportCsv() {
-    const tokens = JSON.parse(localStorage.getItem('pos_tokens') || '{}');
-    fetch(`${BASE_URL}/reports/sales-report/export/csv/`, {
-      headers: { Authorization: `Bearer ${tokens.access}` },
-    })
-      .then(res => res.blob())
-      .then(blob => {
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'sales_report.csv';
-        a.click();
-      });
+  const [notice, setNotice] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  useEffect(() => { apiFetch('/reports/sales-report/').then(setReport).catch(error => setNotice({ text: `${error.message} Reports require a Manager or Admin account.` })); }, []);
+  async function exportCsv() {
+    setExporting(true); setNotice(null);
+    try {
+      const blob = await apiFetch('/reports/sales-report/export/csv/');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = 'sales_report.csv'; document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { setNotice({ text: error.message }); }
+    finally { setExporting(false); }
   }
-
-  if (error) return <p style={{ color: 'crimson', padding: 20 }}>{error} (Reports require Manager or Admin login)</p>;
-  if (!report) return <p style={{ padding: 20 }}>Loading report…</p>;
-
-  return (
-    <div style={{ fontFamily: 'sans-serif', padding: 20 }}>
-      <h2>Sales Report (UC5)</h2>
-      <p><strong>Total Revenue: K{report.total_revenue}</strong></p>
-
-      <h3>Daily Revenue</h3>
-      <table border="1" cellPadding="6" style={{ borderCollapse: 'collapse', marginBottom: 20 }}>
-        <thead><tr><th>Day</th><th>Total</th></tr></thead>
-        <tbody>
-          {report.daily_revenue.map(d => <tr key={d.day}><td>{d.day}</td><td>K{d.total}</td></tr>)}
-        </tbody>
-      </table>
-
-      <h3>Top-Selling Titles</h3>
-      <table border="1" cellPadding="6" style={{ borderCollapse: 'collapse', marginBottom: 20 }}>
-        <thead><tr><th>Title</th><th>Units Sold</th><th>Revenue</th></tr></thead>
-        <tbody>
-          {report.top_titles.map(t => (
-            <tr key={t.book__isbn}><td>{t.book__title}</td><td>{t.units_sold}</td><td>K{t.revenue}</td></tr>
-          ))}
-        </tbody>
-      </table>
-
-      <button onClick={exportCsv}>Export as CSV (UC12)</button>
-    </div>
-  );
+  return <Page title="Reports" description="Review sales performance and discover your bestselling books." action={<button className="primary-button" disabled={!report || exporting} onClick={exportCsv}>{exporting ? 'Exporting…' : 'Export CSV'}</button>}><Notice notice={notice} />{report ? <><div className="summary-grid"><div className="summary-card featured"><span>Total revenue</span><strong>{money(report.total_revenue)}</strong><p>Completed sales · all time</p></div><div className="summary-card"><span>Sales days</span><strong>{report.daily_revenue.length}</strong><p>Days with completed sales</p></div><div className="summary-card"><span>Top-selling title</span><strong className="summary-title">{report.top_titles[0]?.book__title || 'No sales yet'}</strong><p>{report.top_titles[0] ? `${report.top_titles[0].units_sold} units sold` : 'Your next sale starts the story'}</p></div></div><div className="report-grid"><Panel title="Daily revenue" badge="All time"><div className="data-table-wrap"><table className="data-table"><thead><tr><th>Date</th><th className="numeric">Revenue</th></tr></thead><tbody>{report.daily_revenue.map(day => <tr key={day.day}><td>{new Date(`${day.day}T00:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</td><td className="numeric"><strong>{money(day.total)}</strong></td></tr>)}{!report.daily_revenue.length && <EmptyRow columns={2}>Daily revenue will appear after your first sale.</EmptyRow>}</tbody></table></div></Panel><Panel title="Top-selling titles" badge="Top 10"><div className="data-table-wrap"><table className="data-table"><thead><tr><th>Book</th><th className="numeric">Units sold</th><th className="numeric">Revenue</th></tr></thead><tbody>{report.top_titles.map(title => <tr key={title.book__isbn}><td><strong>{title.book__title}</strong><span className="table-subtitle">{title.book__isbn}</span></td><td className="numeric">{title.units_sold}</td><td className="numeric"><strong>{money(title.revenue)}</strong></td></tr>)}{!report.top_titles.length && <EmptyRow columns={3}>Your bestselling books will appear here.</EmptyRow>}</tbody></table></div></Panel></div></> : !notice && <div className="loading-card" role="status">Loading sales report…</div>}</Page>;
 }

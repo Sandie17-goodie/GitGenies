@@ -1,124 +1,94 @@
-// OWNER: Person 3 - Sales & Checkout (UC1 Process Sale, UC3 Return, UC17 Void)
-// Also uses Person 2's search endpoint (UC2) to find items to add to the cart.
-import { useState } from 'react';
+﻿import { useRef, useState } from 'react';
 import { apiFetch } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 
+const money = value => `K${Number(value).toFixed(2)}`;
+function SearchIcon() {
+  return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4.5 4.5" /></svg>;
+}
 export default function Till() {
+  const { user } = useAuth();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
-  const [cart, setCart] = useState([]); // [{isbn, title, price, quantity}]
+  const [searched, setSearched] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [cart, setCart] = useState([]);
   const [paymentMethod, setPaymentMethod] = useState('CASH');
-  const [message, setMessage] = useState('');
+  const [notice, setNotice] = useState(null);
   const [lastSaleId, setLastSaleId] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const transactionLock = useRef(false);
+  const canVoid = ['STORE_MANAGER', 'ADMIN'].includes(user?.role);
+  const itemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+  const total = cart.reduce((sum, item) => sum + item.quantity * Number(item.price), 0);
 
-  // --- UC2: Search Book by ISBN (Person 2's endpoint) ---
-  async function handleSearch(e) {
-    e.preventDefault();
-    setMessage('');
+  async function handleSearch(event) {
+    event.preventDefault();
+    setSearching(true);
     try {
-      const data = await apiFetch(`/books/?q=${encodeURIComponent(query)}`);
-      setResults(data);
-    } catch (err) {
-      setMessage(err.message);
-    }
+      setResults(await apiFetch(`/books/?q=${encodeURIComponent(query)}`));
+      setSearched(true);
+    } catch (error) { setNotice({ type: 'error', text: error.message }); }
+    finally { setSearching(false); }
   }
-
   function addToCart(book) {
-    setCart(prev => {
-      const existing = prev.find(i => i.isbn === book.isbn);
-      if (existing) {
-        return prev.map(i => i.isbn === book.isbn ? { ...i, quantity: i.quantity + 1 } : i);
-      }
-      return [...prev, { isbn: book.isbn, title: book.title, price: book.price, quantity: 1 }];
+    setCart(previous => {
+      const existing = previous.find(item => item.isbn === book.isbn);
+      if (existing) return previous.map(item => item.isbn === book.isbn ? { ...item, quantity: Math.min(item.quantity + 1, book.quantity_on_hand) } : item);
+      return [...previous, { ...book, quantity: 1 }];
     });
   }
-
-  const total = cart.reduce((sum, i) => sum + i.quantity * Number(i.price), 0);
-
-  // --- UC1: Process Sale ---
-  async function checkout() {
-    setMessage('');
-    try {
-      const payload = {
-        items: cart.map(i => ({ isbn: i.isbn, quantity: i.quantity })),
-        payment_method: paymentMethod,
-      };
-      const sale = await apiFetch('/sales/', { method: 'POST', body: JSON.stringify(payload) });
-      setLastSaleId(sale.id);
-      setMessage(`Sale #${sale.id} completed. Total: K${sale.total_amount}`);
-      setCart([]);
-    } catch (err) {
-      setMessage(err.message);
-    }
+  function changeQuantity(isbn, delta) {
+    setCart(previous => previous.map(item => item.isbn === isbn ? { ...item, quantity: Math.min(item.quantity_on_hand, item.quantity + delta) } : item).filter(item => item.quantity > 0));
   }
-
-  // --- UC17: Void/Cancel Transaction (requires Manager/Admin login to actually succeed server-side) ---
+  async function checkout() {
+    if (transactionLock.current || !cart.length) return;
+    transactionLock.current = true;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const sale = await apiFetch('/sales/', { method: 'POST', body: JSON.stringify({ items: cart.map(({ isbn, quantity }) => ({ isbn, quantity })), payment_method: paymentMethod }) });
+      setLastSaleId(sale.id);
+      setResults(previous => previous.map(book => ({ ...book, quantity_on_hand: Math.max(0, book.quantity_on_hand - (cart.find(item => item.isbn === book.isbn)?.quantity || 0)) })));
+      setCart([]);
+      setNotice({ type: 'success', text: `Sale #${sale.id} completed. Total: ${money(sale.total_amount)}.` });
+    } catch (error) { setNotice({ type: 'error', text: error.message }); }
+    finally { transactionLock.current = false; setBusy(false); }
+  }
   async function voidLastSale() {
-    if (!lastSaleId) return;
-    setMessage('');
+    if (!lastSaleId || transactionLock.current || !canVoid) return;
+    transactionLock.current = true;
+    setBusy(true);
     try {
       await apiFetch(`/sales/${lastSaleId}/void/`, { method: 'POST' });
-      setMessage(`Sale #${lastSaleId} voided.`);
-    } catch (err) {
-      setMessage(err.message);
-    }
+      setNotice({ type: 'success', text: `Sale #${lastSaleId} voided. Stock has been restored.` });
+      setLastSaleId(null);
+      setResults([]);
+      setSearched(false);
+    } catch (error) { setNotice({ type: 'error', text: error.message }); }
+    finally { transactionLock.current = false; setBusy(false); }
   }
-
   return (
-    <div style={{ fontFamily: 'sans-serif', padding: 20 }}>
-      <h2>Till — Process Sale</h2>
-
-      <form onSubmit={handleSearch} style={{ marginBottom: 16 }}>
-        <input
-          placeholder="Search by ISBN, title, or author"
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          style={{ padding: 8, width: 320 }}
-        />
-        <button type="submit" style={{ padding: 8, marginLeft: 8 }}>Search</button>
-      </form>
-
-      {results.length > 0 && (
-        <table border="1" cellPadding="6" style={{ marginBottom: 20, borderCollapse: 'collapse' }}>
-          <thead><tr><th>Title</th><th>ISBN</th><th>Price</th><th>In Stock</th><th></th></tr></thead>
-          <tbody>
-            {results.map(b => (
-              <tr key={b.isbn}>
-                <td>{b.title}</td>
-                <td>{b.isbn}</td>
-                <td>K{b.price}</td>
-                <td>{b.quantity_on_hand}</td>
-                <td><button onClick={() => addToCart(b)} disabled={b.quantity_on_hand <= 0}>Add</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      <h3>Cart</h3>
-      <table border="1" cellPadding="6" style={{ borderCollapse: 'collapse', minWidth: 400 }}>
-        <thead><tr><th>Title</th><th>Qty</th><th>Line Total</th></tr></thead>
-        <tbody>
-          {cart.map(i => (
-            <tr key={i.isbn}>
-              <td>{i.title}</td>
-              <td>{i.quantity}</td>
-              <td>K{(i.quantity * i.price).toFixed(2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-
-      <p><strong>Total: K{total.toFixed(2)}</strong></p>
-
-      <select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)}>
-        <option value="CASH">Cash</option>
-        <option value="CARD">Card</option>
-      </select>
-      <button onClick={checkout} disabled={cart.length === 0} style={{ marginLeft: 8 }}>Checkout</button>
-      <button onClick={voidLastSale} disabled={!lastSaleId} style={{ marginLeft: 8 }}>Void Last Sale (Manager/Admin only)</button>
-
-      {message && <p style={{ marginTop: 12 }}>{message}</p>}
-    </div>
+    <main className="till-page">
+      <div className="page-heading"><div><p className="eyebrow">YOUR SALES WORKSPACE</p><h1>Till</h1><p className="muted">Find a book, build a cart, and make someone's next great read.</p></div><span className="workspace-label">Point of sale</span></div>
+      {notice && <div className={`notice ${notice.type}`} role={notice.type === 'error' ? 'alert' : 'status'}>{notice.text}<button aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button></div>}
+      <div className="till-layout">
+        <section className="catalog-panel" aria-labelledby="catalog-heading">
+          <div className="section-heading"><h2 id="catalog-heading">Book catalog</h2><span className="muted">Search & discover</span></div>
+          <form className="search-form" onSubmit={handleSearch}><div className="search-input"><SearchIcon /><input aria-label="Search by ISBN, title, or author" placeholder="Search by ISBN, title, or author" value={query} onChange={event => setQuery(event.target.value)} /></div><button className="primary-button" disabled={searching}>{searching ? 'Searching…' : 'Search'}</button></form>
+          <div className="catalog-content" aria-busy={searching}>
+            {!results.length ? <div className="empty-state"><span className="empty-icon"><SearchIcon /></span><h3>{searched ? 'No books found' : 'A great read starts here'}</h3><p>{searched ? 'Try a different title, author, or ISBN.' : 'Search the catalog to find books and add them to your cart.'}</p>{!searched && <span className="empty-hint">Tip: leave the search blank to browse all books</span>}</div> : <><div className="results-heading"><span>{results.length} {results.length === 1 ? 'book' : 'books'} found</span><span>Prices in ZMW</span></div><div className="book-list">{results.map(book => {
+              const inCart = cart.find(item => item.isbn === book.isbn)?.quantity || 0;
+              return <article className="book-row" key={book.isbn}><div className="book-symbol" aria-hidden="true">▤</div><div className="book-details"><h3>{book.title}</h3><p>{book.author}</p><span className="isbn">ISBN {book.isbn}</span><span className={`stock-label ${book.quantity_on_hand === 0 ? 'out-of-stock' : ''}`}>{book.quantity_on_hand > 0 ? `${book.quantity_on_hand} in stock` : 'Out of stock'}</span></div><div className="book-action"><strong>{money(book.price)}</strong><button className="add-button" disabled={busy || inCart >= book.quantity_on_hand} onClick={() => addToCart(book)} aria-label={`Add ${book.title} to cart`}>{book.quantity_on_hand === 0 ? 'Unavailable' : inCart >= book.quantity_on_hand ? 'All added' : '+ Add'}</button></div></article>;
+            })}</div></>}
+          </div>
+        </section>
+        <aside className="cart-panel" aria-labelledby="cart-heading"><div className="cart-heading"><h2 id="cart-heading">Current Cart</h2><span className="count-badge">{itemCount} {itemCount === 1 ? 'item' : 'items'}</span></div>
+          <div className="cart-table-wrap"><table className="cart-table"><thead><tr><th>Title</th><th>Qty</th><th>Line Total</th></tr></thead><tbody>{cart.map(item => <tr key={item.isbn}><td><strong>{item.title}</strong><span className="unit-price">{money(item.price)} each</span></td><td><div className="quantity-stepper"><button disabled={busy} aria-label={`Decrease quantity of ${item.title}`} onClick={() => changeQuantity(item.isbn, -1)}>−</button><span>{item.quantity}</span><button disabled={busy || item.quantity >= item.quantity_on_hand} aria-label={`Increase quantity of ${item.title}`} onClick={() => changeQuantity(item.isbn, 1)}>+</button></div></td><td>{money(item.quantity * item.price)}</td></tr>)}</tbody></table></div>
+          {!cart.length && <div className="cart-empty"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 3h2l3 12h11l2-8H6M9 19h.01M18 19h.01" strokeLinecap="round" /><circle cx="9" cy="19" r="1" /><circle cx="18" cy="19" r="1" /></svg><h3>Your cart is empty</h3><p>Add a book to get started.</p></div>}
+          <div className="cart-footer"><div className="total-row"><span>Total</span><strong aria-live="polite">{money(total)}</strong></div><label className="payment-label" htmlFor="payment-method">Payment method</label><select id="payment-method" disabled={busy} value={paymentMethod} onChange={event => setPaymentMethod(event.target.value)}><option value="CASH">Cash</option><option value="CARD">Card</option></select><button className="primary-button checkout-button" disabled={!cart.length || busy} onClick={checkout}>{busy ? 'Processing…' : 'Checkout'}<span aria-hidden="true">→</span></button><button className="void-button" disabled={!lastSaleId || busy || !canVoid} onClick={voidLastSale}>Void Last Sale</button><p className="cart-note">Voids require a Manager or Admin account.</p></div>
+        </aside>
+      </div>
+    </main>
   );
 }
